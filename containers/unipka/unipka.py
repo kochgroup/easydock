@@ -2385,10 +2385,11 @@ class UnipkaStream:
         pending: Dict[str, dict] = {}
         # name registry for deduplication: smi → [name, ...]
         smi_to_names: Dict[str, List[str]] = defaultdict(list)
-        # reverse index: microstate_smi → parent_smi
-        microstate_to_smi: Dict[str, str] = {}
-        # accumulation buffer for GPU
-        microstate_queue: List[str] = []
+        # accumulation buffer for GPU, (parent_smi, microstate_smi) pairs. A microstate can
+        # be shared by several parent molecules (e.g. if the input contains the same compound
+        # in different protonation states), thus the parent is stored along with a microstate
+        # instead of a microstate_smi → parent_smi index, which would lose all parents but one
+        microstate_queue: List[Tuple[str, str]] = []
         last_gpu_time = time.monotonic()
 
         get_ensemble_fn = partial(
@@ -2418,29 +2419,32 @@ class UnipkaStream:
                     ms for mss in ensemble.values() for ms in mss
                 ]
                 if smi in pending:
-                    # already registered (shouldn't happen since priority_stream deduplicates)
+                    # the same SMILES is still being processed, its names (including the ones
+                    # registered by this duplicate) are emitted when it completes
                     pass
                 elif len(all_microstates) == 0:
                     # empty ensemble — complete immediately
-                    logger.debug(f'Empty ensemble for {smi}: yielding no forms for {smi_to_names[smi]}')
-                    for name in smi_to_names[smi]:
+                    names = smi_to_names.pop(smi, [])
+                    logger.debug(f'Empty ensemble for {smi}: yielding no forms for {names}')
+                    for name in names:
                         yield MolResult(smi, name, [], {})
                 else:
+                    # 'predicted' is keyed by microstate SMILES, so 'total' must count
+                    # distinct microstates, otherwise the molecule would never complete
+                    unique_microstates = list(dict.fromkeys(all_microstates))
                     pending[smi] = {
                         'ensemble': ensemble,
-                        'total': len(all_microstates),
+                        'total': len(unique_microstates),
                         'predicted': {},
                     }
-                    for ms in all_microstates:
-                        microstate_to_smi[ms] = smi
-                    microstate_queue.extend(all_microstates)
+                    microstate_queue.extend((smi, ms) for ms in unique_microstates)
 
                 # trigger GPU if threshold or timeout reached
                 now = time.monotonic()
                 if (len(microstate_queue) >= self._gpu_trigger_microstates or
                         now - last_gpu_time >= self._gpu_trigger_timeout):
                     yield from self._flush_gpu(
-                        microstate_queue, pending, microstate_to_smi, smi_to_names
+                        microstate_queue, pending, smi_to_names
                     )
                     microstate_queue.clear()
                     last_gpu_time = time.monotonic()
@@ -2448,58 +2452,80 @@ class UnipkaStream:
             # flush remaining microstates after source is exhausted
             if microstate_queue:
                 yield from self._flush_gpu(
-                    microstate_queue, pending, microstate_to_smi, smi_to_names
+                    microstate_queue, pending, smi_to_names
                 )
+                microstate_queue.clear()
+
+            # nothing must be left unfinished at this point. If it happens anyway, report it
+            # and return empty results, so that molecules never disappear from the output
+            for smi in list(pending):
+                mol_state = pending.pop(smi)
+                names = smi_to_names.pop(smi, [])
+                logger.error(f'Molecule {smi} was left unfinished '
+                             f'({len(mol_state["predicted"])} of {mol_state["total"]} microstates '
+                             f'were predicted), no protonation forms are returned for {names}')
+                for name in names:
+                    yield MolResult(smi, name, [], {})
 
     def _flush_gpu(
         self,
-        microstate_queue: List[str],
+        microstate_queue: List[Tuple[str, str]],
         pending: dict,
-        microstate_to_smi: Dict[str, str],
         smi_to_names: Dict[str, List[str]],
     ) -> Iterator[MolResult]:
-        """Run predictor on accumulated microstates; yield completed molecules."""
+        """
+        Run predictor on accumulated (parent_smi, microstate_smi) pairs; yield completed
+        molecules. A microstate shared by several parents is predicted once and credited
+        to each of them.
+        """
         if not microstate_queue:
             return
 
-        gpu_results = self._predictor.predict(list(microstate_queue))
+        unique_microstates = list(dict.fromkeys(ms for _, ms in microstate_queue))
+        gpu_results = self._predictor.predict(unique_microstates)
 
-        for ms in microstate_queue:
-            parent = microstate_to_smi.pop(ms, None)
-            if parent is None or parent not in pending:
+        completed = []
+        for parent, ms in microstate_queue:
+            mol_state = pending.get(parent)
+            if mol_state is None:
                 continue
             energy = gpu_results.get(ms)  # None if not predicted
             if energy is None:
                 logger.debug(f'GPU prediction returned None for microstate {ms} (parent {parent})')
-            pending[parent]['predicted'][ms] = energy
-
-            mol_state = pending[parent]
+            mol_state['predicted'][ms] = energy
             if len(mol_state['predicted']) == mol_state['total']:
-                # all microstates predicted — compute major form
-                ensemble_free_energy = defaultdict(list)
-                for charge, microstates in mol_state['ensemble'].items():
-                    for m in microstates:
-                        e = mol_state['predicted'].get(m)
-                        if e is not None:
-                            ensemble_free_energy[charge].append((m, e))
-                ensemble_free_energy = dict(ensemble_free_energy)
+                completed.append(parent)
 
-                if not ensemble_free_energy:
-                    logger.debug(f'No predicted energies for {parent}: all microstates failed GPU prediction')
+        for parent in completed:
+            # all microstates predicted — compute major form
+            mol_state = pending[parent]
+            ensemble_free_energy = defaultdict(list)
+            for charge, microstates in mol_state['ensemble'].items():
+                for m in microstates:
+                    e = mol_state['predicted'].get(m)
+                    if e is not None:
+                        ensemble_free_energy[charge].append((m, e))
+            ensemble_free_energy = dict(ensemble_free_energy)
 
-                try:
-                    _, forms = get_forms_from_ensemble(
-                        (parent, ensemble_free_energy), self._pH, self._n_forms, self._min_occupancy
-                    )
-                except Exception:
-                    logger.debug(f'get_forms_from_ensemble failed for {parent}', exc_info=True)
-                    forms = []
+            if not ensemble_free_energy:
+                logger.debug(f'No predicted energies for {parent}: all microstates failed GPU prediction')
 
-                if not forms:
-                    logger.debug(f'No protonation forms for {parent} (names: {smi_to_names[parent]})')
-                for name in smi_to_names[parent]:
-                    yield MolResult(parent, name, forms, ensemble_free_energy)
-                del pending[parent]
+            try:
+                _, forms = get_forms_from_ensemble(
+                    (parent, ensemble_free_energy), self._pH, self._n_forms, self._min_occupancy
+                )
+            except Exception:
+                logger.debug(f'get_forms_from_ensemble failed for {parent}', exc_info=True)
+                forms = []
+
+            # names are consumed, so that a duplicate of the same SMILES arriving after this
+            # point emits only its own name instead of the whole group once again
+            names = smi_to_names.pop(parent, [])
+            if not forms:
+                logger.debug(f'No protonation forms for {parent} (names: {names})')
+            for name in names:
+                yield MolResult(parent, name, forms, ensemble_free_energy)
+            del pending[parent]
 
 
 # images are always plotted for the whole pH range with a fine step to get smooth curves,

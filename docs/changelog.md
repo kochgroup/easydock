@@ -1,4 +1,6 @@
-**unreleased (accessible from master)**  
+**1.3.2**  
+- Uni-pKa container: fix silent loss of molecules which share microspecies with another molecule of the same batch (e.g. the same compound supplied in different protonation states or written as different SMILES); such microspecies are now also predicted only once  
+- Uni-pKa container: report molecules which could not be completed instead of omitting them from the output  
 - Uni-pKa container: add `--png` argument to plot the distribution of individual microspecies together with their 2D structures, one image per molecule; curves and structures are linked by colour. Images are always plotted for the whole pH range 0-14.  
 
 **1.3.1**  
