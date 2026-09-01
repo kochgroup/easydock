@@ -523,7 +523,13 @@ def insert_db(db_fname, data, cols=None, table_name='mols'):
             cur.execute(f"SELECT COUNT(rowid) FROM {table_name}")
             inserted_row_count = cur.fetchone()[0] - row_count
 
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            db_name_str = db_fname if isinstance(db_fname, str) else 'an existing connection'
+            logging.error(f'Insertion of {len(data)} record(s) into the table "{table_name}" of the DB {db_name_str} '
+                          f'failed: {e}\n{traceback.format_exc()}')
+            conn.rollback()
+
+        finally:
             if should_close:
                 conn.close()
 
