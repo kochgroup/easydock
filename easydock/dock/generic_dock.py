@@ -36,7 +36,7 @@ def __parse_config(config_fname):
     if 'script_file' in config:
         config['script_file'] = resolve_path(str(config['script_file']), config_dir)
     if 'env' in config:
-        config['env'] = resolve_path(str(config['env']), config_dir)
+        config['env'] = config['env'] #resolve_path(str(config['env']), config_dir)
     program_args = config.get('program_args') or {}
     for key, value in program_args.items():
         if isinstance(value, str):
