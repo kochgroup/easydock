@@ -7,7 +7,7 @@ output_arg_name: --out
 score_mode: max
 
 program_args:
-  config: gold.conf
+  config: NADPH/gold.conf
 
 parse_score:
   score_field: docking_score
