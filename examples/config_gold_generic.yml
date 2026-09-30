@@ -8,6 +8,7 @@ score_mode: max
 
 program_args:
   config: NADPH/gold.conf
+  ndocks: 1
 
 parse_score:
   score_field: docking_score
