@@ -29,7 +29,7 @@ if __name__ == "__main__":
     # specify ligand file 
     settings.clear_ligand_files()
     lig_file = args.ligand
-    settings.add_ligand_file(lig_file, 1) #file_name, ndocks=1, start=0, finish=0)
+    settings.add_ligand_file(lig_file, args.ndocks) #file_name, ndocks=1, start=0, finish=0)
 
     # write outputs to temp dir
     batch_tempd = tempfile.mkdtemp()
