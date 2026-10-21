@@ -2,6 +2,7 @@ script_file: run_gold.py
 env: ccdc_env
 ligand_in_format: mol #'mol': '.sdf'
 ligand_out_format: sdf
+raw_format: sdf
 input_arg_name: --ligand
 output_arg_name: --out
 score_mode: max

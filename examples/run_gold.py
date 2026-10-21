@@ -48,6 +48,7 @@ if __name__ == "__main__":
             for ligand in ligands:
                 ligand.attributes.update({'docking_score': ligand.fitness(settings.fitness_function)})
                 sdf_str = ligand.to_string(format='sdf')
+                sdf_str.replace('$$$$', '$$$$\n')
                 f.write(sdf_str)
     except RuntimeError:
         print("No gold solution files")
